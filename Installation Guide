@@ -1,0 +1,365 @@
+## Pre-Installation Requirements
+
+### Software Downloads Needed
+
+1. **Windows Server 2025 & 2019 ISO**
+    
+    - Download from: https://www.microsoft.com/en-us/evalcenter/download-windows-server-2025
+    - Download from: https://www.microsoft.com/en-us/evalcenter/download-windows-server-2019
+    - Get evaluation version (180-day trial)
+    
+2. **Windows 11 ISO**
+    
+    - Download from: https://www.microsoft.com/en-us/evalcenter/download-windows-11-enterprise
+    - Or use Media Creation Tool
+    
+3. **SQL Server 2019 Express**
+    
+    - Download from: https://go.microsoft.com/fwlink/?linkid=866658
+    - Or: https://www.microsoft.com/en-us/sql-server/sql-server-downloads
+    
+4. **Kali Linux ISO**
+    
+    - Download from: https://www.kali.org/get-kali/
+    
+5. **VMware Workstation Pro**
+    
+    - Download from: https://access.broadcom.com/default/ui/v1/signin/
+
+6. Internet Information Services (IIS) 10.0 Express
+
+	* Download from: https://www.microsoft.com/en-us/download/details.aspx?id=48264
+
+7. Microsoft® SQL Server® 2019 Express
+
+    * Download from: https://www.microsoft.com/en-in/download/details.aspx?id=101064
+
+
+### Hardware Requirements
+
+- Host Machine: 32GB RAM minimum (64GB recommended)
+- CPU: 8+ cores with virtualization enabled (VT-x/AMD-V)
+- Storage: 500GB+ free disk space (SSD recommended)
+- Network: Isolated virtual network adapter
+
+---
+
+## VMware Workstation Setup (30 minutes)
+
+### Step 1: Install VMware Workstation
+
+1. Run VMware Workstation installer
+2. Complete installation with default options
+3. Accept license agreement
+4. Restart if prompted
+5. Launch VMware Workstation
+
+### Step 2: Create Virtual Network for Lab
+
+1. Open VMware Workstation
+2. Go to **Edit → Virtual Network Editor**
+3. Click **Change Settings** (requires admin privileges)
+4. Click **Add Network**
+5. Select **VMnet2** (or any available VMnet number)
+6. Configure VMnet2:
+    - **Type**: Host-only
+    - **Subnet IP**: 192.168.100.0
+    - **Subnet mask**: 255.255.255.0
+    - **Uncheck**: Use local DHCP service
+7. Click **OK**
+8. Click **Apply**
+
+**✅ VMware network configured! All VMs will use VMnet2**
+
+---
+
+
+### Install AD Pentesting Tools
+
+```bash
+# Update system
+sudo apt update && sudo apt full-upgrade -y
+
+# Install essential tools
+sudo apt install -y python3-impacket bloodhound crackmapexec
+sudo apt install -y smbclient enum4linux-ng nmap responder proxychains
+sudo apt install -y ldap-utils smbmap evil-winrm
+
+# Install Neo4j for BloodHound
+sudo apt install -y neo4j
+
+# Start and enable Neo4j
+sudo systemctl enable neo4j
+sudo systemctl start neo4j
+
+# Set Neo4j password
+# Open browser: http://localhost:7474
+# Default: neo4j/neo4j
+# Change to: neo4j/BloodHound123!
+
+# Start BloodHound
+bloodhound
+```
+
+### Test Connectivity
+
+```bash
+# Test DNS
+nslookup dc01.redteam.lab 192.168.100.10
+nslookup srv02.redteam.lab
+
+# Test ping
+ping -c 4 192.168.100.10
+
+# Scan network
+sudo nmap -sn 192.168.100.0/24
+
+# Test SMB
+crackmapexec smb 192.168.100.0/24
+
+# Test credentials
+crackmapexec smb 192.168.100.10 -u 'jsmith' -p 'Summer2024!' -d redteam.lab
+```
+
+### Take Snapshot
+
+**✅ Kali Complete! Attacker machine ready with all tools**
+
+---
+
+## Final Validation and Testing (15 minutes)
+
+### From DC01
+
+```powershell
+# Verify all computers
+Get-ADComputer -Filter * | Select Name, DNSHostName, OperatingSystem
+
+# Verify users
+Get-ADUser -Filter * | Select Name, SamAccountName, Enabled | Format-Table
+
+# Verify SPNs
+Get-ADUser -Filter {ServicePrincipalName -like "*"} -Properties ServicePrincipalName | Select Name, ServicePrincipalName
+
+# Verify trusts
+Get-ADTrust -Filter * | Select Name, Direction, TrustType
+
+# Test DNS resolution
+nslookup dc02.dev.redteam.lab
+nslookup dc03.external.lab
+nslookup srv02.redteam.lab
+nslookup srv03.redteam.lab
+nslookup ws01.redteam.lab
+
+# Verify groups and members
+Get-ADGroup -Filter * | Select Name
+Get-ADGroupMember -Identity "Domain Admins"
+```
+
+### From SRV02
+
+```powershell
+# Test SQL Server
+sqlcmd -S localhost -U sa -P "SQLAdmin123!" -Q "SELECT @@VERSION"
+
+# Test xp_cmdshell
+sqlcmd -S localhost -U sa -P "SQLAdmin123!" -Q "EXEC xp_cmdshell 'whoami'"
+
+# Test connectivity to DC
+Test-ComputerSecureChannel -Verbose
+```
+
+### From SRV03
+
+```powershell
+# Test IIS
+Invoke-WebRequest -Uri http://localhost -UseBasicParsing
+
+# Verify IIS is running
+Get-Service W3SVC
+
+# Test vulnerable pages
+Start-Process "http://localhost/Default.aspx"
+Start-Process "http://localhost/search.aspx"
+```
+
+### From WS01
+
+```powershell
+# Verify domain membership
+Test-ComputerSecureChannel -Verbose
+
+# Test network shares
+net view \\srv02
+net view \\srv03
+net view \\dc01
+
+# List domain users
+net user /domain
+
+# Check scheduled tasks
+Get-ScheduledTask -TaskName "BackupTask"
+```
+
+### From Kali
+
+```bash
+# Comprehensive network scan
+sudo nmap -sV -p 445,88,389,3389,1433,80 192.168.100.0/24
+
+# Test SMB signing
+crackmapexec smb 192.168.100.0/24 --gen-relay-list targets.txt
+
+# Test credentials across network
+crackmapexec smb 192.168.100.0/24 -u 'jsmith' -p 'Summer2024!' -d redteam.lab
+
+# Enumerate users
+crackmapexec smb 192.168.100.10 -u 'jsmith' -p 'Summer2024!' -d redteam.lab --users
+
+# Enumerate shares
+crackmapexec smb 192.168.100.0/24 -u 'jsmith' -p 'Summer2024!' -d redteam.lab --shares
+
+# Run Responder (test LLMNR/NBT-NS)
+sudo responder -I eth0 -A
+
+# Collect BloodHound data
+bloodhound-python -u jsmith -p 'Summer2024!' -d redteam.lab -ns 192.168.100.10 -c all --zip
+
+# Import into BloodHound and analyze
+```
+
+---
+
+## Quick Reference: Credentials Summary
+
+### Domain: redteam.lab
+
+- Domain Admin: `Administrator / P@ssw0rd123!`
+- Users: `jsmith, sconnor, bjohnson / Summer2024!`
+- Admin: `sqladmin, backupadmin / Summer2024!`
+- Service: `svc_sql, svc_iis / Summer2024!`
+
+### Domain: dev.redteam.lab
+
+- Domain Admin: `Administrator / P@ssw0rd123!`
+- Users: `adev, tengineer, mtester / DevPass2024!`
+- Admin: `devadmin / DevPass2024!`
+- Service: `svc_web, svc_app / DevPass2024!`
+
+### Domain: external.lab
+
+- Domain Admin: `Administrator / P@ssw0rd123!`
+- Users: `euser1, euser2, contractor / External2024!`
+- Admin: `extadmin / External2024!`
+- Service: `svc_external / External2024!`
+
+### SQL Server (SRV02)
+
+- SA: `sa / SQLAdmin123!`
+- SQL User: `sqladmin / SQLAdmin123!`
+- App User: `webapp / WebApp2024!`
+
+### Local Accounts
+
+- WS01 Local Admin: `localadmin / LocalAdmin123!`
+- Kali: `redteam / Kali2024!`
+
+### Trust Password
+
+- Forest Trust: `TrustP@ss123!`
+
+---
+
+## Network Diagram
+
+```
+192.168.100.0/24 (VMnet2)
+│
+├── 192.168.100.1   - Gateway (VMware Host)
+├── 192.168.100.10  - DC01 (redteam.lab root DC)
+├── 192.168.100.11  - DC02 (dev.redteam.lab child DC)
+├── 192.168.100.12  - SRV02 (SQL Server)
+├── 192.168.100.13  - SRV03 (IIS Web Server)
+├── 192.168.100.15  - DC03 (external.lab DC)
+├── 192.168.100.20  - WS01 (Workstation)
+└── 192.168.100.50  - Kali (Attacker)
+```
+
+---
+
+## Troubleshooting Common Issues
+
+### DNS Resolution Issues
+
+```powershell
+# On affected machine, flush DNS
+ipconfig /flushdns
+Clear-DnsClientCache
+
+# Re-register DNS
+ipconfig /registerdns
+
+# On DC01, check DNS zones
+Get-DnsServerZone
+Get-DnsServerResourceRecord -ZoneName "redteam.lab"
+```
+
+### Domain Trust Issues
+
+```powershell
+# Test trust
+Test-ComputerSecureChannel -Repair -Credential (Get-Credential)
+
+# Verify trust
+nltest /domain_trusts
+Get-ADTrust -Filter *
+```
+
+### SQL Connection Issues
+
+```powershell
+# Check SQL service
+Get-Service MSSQLSERVER
+
+# Test port
+Test-NetConnection -ComputerName srv02.redteam.lab -Port 1433
+
+# Check firewall
+Get-NetFirewallRule -DisplayName "SQL*"
+```
+
+### VMware Network Issues
+
+```powershell
+# Reset network adapter
+Get-NetAdapter | Restart-NetAdapter
+
+# Verify IP configuration
+Get-NetIPAddress
+Get-DnsClientServerAddress
+```
+
+---
+
+### Next Steps:
+
+1. **Take final snapshots** of all VMs
+2. **Test attack scenarios** from Kali
+3. **Run BloodHound** collection
+4. **Practice CRTP techniques**:
+    - Kerberoasting
+    - AS-REP Roasting
+    - Privilege escalation
+    - Lateral movement
+    - Domain dominance
+
+### Recommended Practice Order:
+
+1. **Reconnaissance**: BloodHound, enumeration
+2. **Initial Access**: LLMNR poisoning, web exploitation
+3. **Privilege Escalation**: Kerberoasting, ACL abuse
+4. **Lateral Movement**: Pass-the-Hash, delegation abuse
+5. **Domain Dominance**: DCSync, Golden Ticket
+6. **Cross-Domain/Forest**: Trust relationship exploitation
+
+Good luck! 
