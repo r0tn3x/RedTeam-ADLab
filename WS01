@@ -1,0 +1,194 @@
+# ============================================
+# WS01 - Workstation Setup (redteam.lab)
+# IP: 192.168.100.20
+# Use Windows 10 or Windows 11
+# ============================================
+
+# Run this script as Administrator
+
+# Set static IP
+$IPAddress = "192.168.100.20"
+$PrefixLength = 24
+$Gateway = "192.168.100.1"
+$DNS = "192.168.100.10"  # DC01
+
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $IPAddress -PrefixLength $PrefixLength -DefaultGateway $Gateway
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses $DNS
+
+# Set computer name
+Rename-Computer -NewName "WS01" -Force
+
+Write-Host "Please restart and run Part 2 of this script" -ForegroundColor Yellow
+# Restart-Computer -Force
+
+# ============================================
+# PART 2 - Join domain
+# ============================================
+
+# Join domain
+$DomainCred = Get-Credential -Message "Enter REDTEAM\Administrator credentials"
+Add-Computer -DomainName "redteam.lab" -Credential $DomainCred -Restart
+
+# ============================================
+# PART 3 - Run after domain join restart
+# ============================================
+
+# Disable Windows Defender Real-Time Protection (for lab only!)
+Set-MpPreference -DisableRealtimeMonitoring $true
+Add-MpPreference -ExclusionPath "C:\"
+
+# Disable Windows Firewall (for lab only!)
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+
+# Disable SMB Signing
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+
+# Enable LLMNR and NetBIOS (vulnerable)
+Get-NetAdapter | Set-DnsClient -RegisterThisConnectionsAddress $true
+
+# Enable WinRM for remote access
+Enable-PSRemoting -Force
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
+
+# Create local admin user (backdoor)
+$LocalAdminPassword = ConvertTo-SecureString "L0c@l-Adm1n-2025!!X" -AsPlainText -Force
+New-LocalUser -Name "localadmin" -Password $LocalAdminPassword -FullName "Local Administrator" -Description "Local admin account"
+Add-LocalGroupMember -Group "Administrators" -Member "localadmin"
+
+# Create vulnerable scheduled task running as SYSTEM
+$Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -Command `"C:\Scripts\backup.ps1`""
+$Trigger = New-ScheduledTaskTrigger -Daily -At 3am
+$Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
+Register-ScheduledTask -TaskName "BackupTask" -Action $Action -Trigger $Trigger -Principal $Principal -Description "Vulnerable backup task"
+
+# Create script directory and vulnerable backup script
+New-Item -Path "C:\Scripts" -ItemType Directory -Force
+
+$VulnerableScript = @"
+# Vulnerable backup script
+# This script runs as SYSTEM and is writable by Domain Users
+
+`$BackupPath = "\\SRV02\SQLBackups\backup_`$(Get-Date -Format 'yyyyMMdd').zip"
+`$SourcePath = "C:\Users"
+
+# Compress and backup
+Compress-Archive -Path `$SourcePath -DestinationPath `$BackupPath -Force
+
+Write-Host "Backup completed to `$BackupPath"
+"@
+
+$VulnerableScript | Out-File "C:\Scripts\backup.ps1" -Encoding ASCII
+
+# Set weak permissions on the script (Domain Users can modify)
+$acl = Get-Acl "C:\Scripts"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Domain Users","Modify","ContainerInherit,ObjectInherit","None","Allow")
+$acl.SetAccessRule($rule)
+Set-Acl "C:\Scripts" -AclObject $acl
+
+# Create file with saved credentials
+New-Item -Path "C:\Users\Public\Documents" -ItemType Directory -Force
+
+$SavedCreds = @"
+# Saved Credentials
+Username: sqladmin
+Password: Summer2024!
+
+SQL Server: SRV02
+Database: TestDB
+
+# VPN Credentials
+VPN_USER=bjohnson
+VPN_PASS=VPNPass2024!
+"@
+
+$SavedCreds | Out-File "C:\Users\Public\Documents\passwords.txt" -Encoding ASCII
+
+# Simulate browser history/saved passwords
+New-Item -Path "C:\Users\Public\Documents\Browser" -ItemType Directory -Force
+
+$BrowserData = @"
+site,username,password
+https://intranet.redteam.lab,jsmith,Summer2024!
+https://mail.redteam.lab,sconnor,Summer2024!
+https://vpn.redteam.lab,bjohnson,VPNPass2024!
+"@
+
+$BrowserData | Out-File "C:\Users\Public\Documents\Browser\credentials.csv" -Encoding ASCII
+
+# Install common applications (simulate real workstation)
+# Chrome, Firefox, Office, etc. would typically be here
+
+# Configure AutoLogon (vulnerable) - Optional
+# $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+# Set-ItemProperty -Path $RegPath -Name "AutoAdminLogon" -Value "1"
+# Set-ItemProperty -Path $RegPath -Name "DefaultUserName" -Value "jsmith"
+# Set-ItemProperty -Path $RegPath -Name "DefaultPassword" -Value "Summer2024!"
+
+# Create AlwaysInstallElevated vulnerability
+New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Force
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+
+New-Item -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Force
+Set-ItemProperty -Path "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Installer" -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+
+# Create vulnerable service
+$ServiceScript = @"
+# Simple service script
+while(`$true) {
+    Start-Sleep -Seconds 60
+}
+"@
+
+$ServiceScript | Out-File "C:\Scripts\service.ps1" -Encoding ASCII
+
+# Configure unquoted service path (vulnerable)
+# This would typically be done with a compiled executable, but for demonstration:
+# sc.exe create "Vulnerable Service" binPath= "C:\Program Files\Vulnerable Service\service.exe"
+
+# Create user files with interesting data
+$InterestingFile = @"
+CONFIDENTIAL - Internal Use Only
+
+Database Servers:
+- SRV02 (SQL): 192.168.100.12
+- Backup credentials: backupadmin / Summer2024!
+
+Admin Accounts:
+- sqladmin (Domain Admin equivalent for SQL)
+- backupadmin (Domain Admin)
+
+Next pentest scheduled: Q2 2024
+"@
+
+$InterestingFile | Out-File "C:\Users\Public\Documents\IT_Info.txt" -Encoding ASCII
+
+# Disable UAC (vulnerable)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
+
+# Configure PowerShell logging (for detection practice)
+$PSLoggingPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+New-Item -Path $PSLoggingPath -Force
+Set-ItemProperty -Path $PSLoggingPath -Name "EnableScriptBlockLogging" -Value 1
+
+# Allow local administrator login
+$AdminPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+Set-ItemProperty -Path $AdminPath -Name "LocalAccountTokenFilterPolicy" -Value 1
+
+Write-Host ""
+Write-Host "WS01 Workstation setup complete!" -ForegroundColor Green
+Write-Host "Computer: WS01.redteam.lab" -ForegroundColor Cyan
+Write-Host "Local Admin: localadmin / LocalAdmin123!" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Vulnerabilities configured:" -ForegroundColor Yellow
+Write-Host "  - AlwaysInstallElevated enabled" -ForegroundColor White
+Write-Host "  - Weak ACLs on C:\Scripts" -ForegroundColor White
+Write-Host "  - Scheduled task running as SYSTEM" -ForegroundColor White
+Write-Host "  - Saved credentials in plaintext" -ForegroundColor White
+Write-Host "  - SMB signing disabled" -ForegroundColor White
+Write-Host "  - LLMNR/NetBIOS enabled" -ForegroundColor White
+Write-Host "  - UAC disabled" -ForegroundColor White
+Write-Host ""
+Write-Host "Login with domain user to simulate user workstation:" -ForegroundColor Cyan
+Write-Host "  - jsmith / Summer2024!" -ForegroundColor White
+Write-Host "  - sconnor / Summer2024!" -ForegroundColor White
+Write-Host "  - bjohnson / Summer2024!" -ForegroundColor White
