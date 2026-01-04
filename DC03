@@ -1,0 +1,111 @@
+# ============================================
+# DC03 - External Forest Domain Controller Setup
+# Domain: external.lab (Separate Forest)
+# IP: 192.168.100.15
+# ============================================
+
+# Run this script as Administrator
+
+# Set static IP
+$IPAddress = "192.168.100.15"
+$PrefixLength = 24
+$Gateway = "192.168.100.1"
+$DNS = "127.0.0.1"
+
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $IPAddress -PrefixLength $PrefixLength -DefaultGateway $Gateway
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses $DNS
+
+# Set computer name
+Rename-Computer -NewName "DC03" -Force
+
+# Install AD DS Role
+Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+
+Write-Host "Please restart and run Part 2 of this script" -ForegroundColor Yellow
+# Restart-Computer -Force
+
+# ============================================
+# PART 2 - Run after restart
+# ============================================
+
+# Promote to Domain Controller (New Forest)
+Import-Module ADDSDeployment
+
+$SecurePassword = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+
+Install-ADDSForest `
+    -DomainName "external.lab" `
+    -DomainNetbiosName "EXTERNAL" `
+    -ForestMode "WinThreshold" `
+    -DomainMode "WinThreshold" `
+    -InstallDns:$true `
+    -DatabasePath "C:\Windows\NTDS" `
+    -LogPath "C:\Windows\NTDS" `
+    -SysvolPath "C:\Windows\SYSVOL" `
+    -SafeModeAdministratorPassword $SecurePassword `
+    -Force:$true
+
+# Server will restart automatically
+
+# ============================================
+# PART 3 - Run after DC promotion restart
+# ============================================
+
+# Add conditional forwarder to redteam.lab
+Add-DnsServerConditionalForwarderZone -Name "redteam.lab" -MasterServers 192.168.100.10
+
+# Create Organizational Units
+New-ADOrganizationalUnit -Name "EXTERNAL-Computers" -Path "DC=external,DC=lab"
+New-ADOrganizationalUnit -Name "EXTERNAL-Users" -Path "DC=external,DC=lab"
+New-ADOrganizationalUnit -Name "EXTERNAL-Servers" -Path "DC=external,DC=lab"
+New-ADOrganizationalUnit -Name "EXTERNAL-ServiceAccounts" -Path "DC=external,DC=lab"
+
+# Create Users
+$Password = ConvertTo-SecureString "External2024!" -AsPlainText -Force
+
+# Regular Users
+New-ADUser -Name "External User1" -SamAccountName "euser1" -UserPrincipalName "euser1@external.lab" -Path "OU=EXTERNAL-Users,DC=external,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "External User2" -SamAccountName "euser2" -UserPrincipalName "euser2@external.lab" -Path "OU=EXTERNAL-Users,DC=external,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Contractor" -SamAccountName "contractor" -UserPrincipalName "contractor@external.lab" -Path "OU=EXTERNAL-Users,DC=external,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Admin Users
+New-ADUser -Name "External Admin" -SamAccountName "extadmin" -UserPrincipalName "extadmin@external.lab" -Path "OU=EXTERNAL-Users,DC=external,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Service Account
+New-ADUser -Name "External Service" -SamAccountName "svc_external" -UserPrincipalName "svc_external@external.lab" -Path "OU=EXTERNAL-ServiceAccounts,DC=external,DC=lab" -AccountPassword $Password -Enabled $true -PasswordNeverExpires $true
+
+# Set SPN for Kerberoasting
+Set-ADUser -Identity "svc_external" -ServicePrincipalNames @{Add="HTTP/external.lab"}
+
+# Create Groups
+New-ADGroup -Name "External IT" -GroupScope Global -Path "OU=EXTERNAL-Users,DC=external,DC=lab"
+New-ADGroup -Name "Contractors" -GroupScope Global -Path "OU=EXTERNAL-Users,DC=external,DC=lab"
+
+# Add users to groups
+Add-ADGroupMember -Identity "External IT" -Members "extadmin"
+Add-ADGroupMember -Identity "Contractors" -Members "contractor"
+Add-ADGroupMember -Identity "Domain Admins" -Members "extadmin"
+
+# Disable SMB Signing
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+Set-SmbServerConfiguration -RequireSecuritySignature $false -Force
+
+Write-Host "DC03 (external.lab) setup complete!" -ForegroundColor Green
+Write-Host "Domain: external.lab" -ForegroundColor Cyan
+Write-Host "Users created with password: External2024!" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "NEXT STEP: Create Forest Trust" -ForegroundColor Yellow
+Write-Host "============================================" -ForegroundColor Yellow
+
+# ============================================
+# PART 4 - Create Forest Trust (Run this on DC03)
+# ============================================
+
+# Run this after DC01 is fully configured
+# This creates a bidirectional forest trust with redteam.lab
+
+ncpa.cpl (run this on DC01 and DC03 and uncheck the IPV6)
+
+# run this command on DC03 
+
+netdom trust external.lab /Domain:redteam.lab /Add /TwoWay /ForestTransitive:Yes /UserD:redteam\Administrator /PasswordD:* /UserO:external\Administrator /PasswordO:*
