@@ -1,0 +1,112 @@
+# ============================================
+# DC02 - Child Domain Controller Setup
+# Domain: dev.redteam.lab (Child of redteam.lab)
+# IP: 192.168.100.11
+# ============================================
+
+# Run this script as Administrator
+
+# Set static IP
+$IPAddress = "192.168.100.11"
+$PrefixLength = 24
+$Gateway = "192.168.100.1"
+$DNS = "192.168.100.10"  # Points to DC01
+
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $IPAddress -PrefixLength $PrefixLength -DefaultGateway $Gateway
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses $DNS
+
+# Set computer name
+Rename-Computer -NewName "DC02" -Force
+
+# Install AD DS Role
+Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+
+Write-Host "Please restart and run Part 2 of this script" -ForegroundColor Yellow
+# Restart-Computer -Force
+
+# ============================================
+# PART 2 - Run after restart
+# ============================================
+
+# Promote to Child Domain Controller
+Import-Module ADDSDeployment
+
+$SecurePassword = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+$DomainCred = Get-Credential -Message "Enter REDTEAM\Administrator credentials"
+
+Install-ADDSDomain `
+    -NewDomainName "dev" `
+    -ParentDomainName "redteam.lab" `
+    -DomainType "ChildDomain" `
+    -InstallDns:$true `
+    -CreateDnsDelegation:$true `
+    -DatabasePath "C:\Windows\NTDS" `
+    -LogPath "C:\Windows\NTDS" `
+    -SysvolPath "C:\Windows\SYSVOL" `
+    -SafeModeAdministratorPassword $SecurePassword `
+    -Credential $DomainCred `
+    -Force:$true
+
+# Server will restart automatically
+
+# ============================================
+# PART 3 - Run after DC promotion restart
+# ============================================
+
+# Create Organizational Units
+New-ADOrganizationalUnit -Name "DEV-Computers" -Path "DC=dev,DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "DEV-Users" -Path "DC=dev,DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "DEV-Servers" -Path "DC=dev,DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "DEV-ServiceAccounts" -Path "DC=dev,DC=redteam,DC=lab"
+
+# Create Users
+$Password = ConvertTo-SecureString "DevPass2024!" -AsPlainText -Force
+
+# Regular Users
+New-ADUser -Name "Alice Developer" -SamAccountName "adev" -UserPrincipalName "adev@dev.redteam.lab" -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Tom Engineer" -SamAccountName "tengineer" -UserPrincipalName "tengineer@dev.redteam.lab" -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Mike Tester" -SamAccountName "mtester" -UserPrincipalName "mtester@dev.redteam.lab" -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Admin Users
+New-ADUser -Name "Dev Admin" -SamAccountName "devadmin" -UserPrincipalName "devadmin@dev.redteam.lab" -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Service Accounts
+New-ADUser -Name "Web Service" -SamAccountName "svc_web" -UserPrincipalName "svc_web@dev.redteam.lab" -Path "OU=DEV-ServiceAccounts,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true -PasswordNeverExpires $true
+New-ADUser -Name "App Service" -SamAccountName "svc_app" -UserPrincipalName "svc_app@dev.redteam.lab" -Path "OU=DEV-ServiceAccounts,DC=dev,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true -PasswordNeverExpires $true
+
+# Set SPNs for Kerberoasting
+Set-ADUser -Identity "svc_web" -ServicePrincipalNames @{Add="HTTP/web.dev.redteam.lab"}
+Set-ADUser -Identity "svc_app" -ServicePrincipalNames @{Add="HTTP/app.dev.redteam.lab"}
+
+# Create Groups
+New-ADGroup -Name "Developers" -GroupScope Global -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab"
+New-ADGroup -Name "DevOps" -GroupScope Global -Path "OU=DEV-Users,DC=dev,DC=redteam,DC=lab"
+
+# Add users to groups
+Add-ADGroupMember -Identity "Developers" -Members "adev","tengineer"
+Add-ADGroupMember -Identity "DevOps" -Members "devadmin"
+
+# Add devadmin to Domain Admins of child domain
+Add-ADGroupMember -Identity "Domain Admins" -Members "devadmin"
+
+# Configure Constrained Delegation (vulnerable)
+Set-ADUser -Identity "svc_web" -Add @{'msDS-AllowedToDelegateTo'=@('CIFS/DC02.dev.redteam.lab','CIFS/DC02')}
+Set-ADAccountControl -Identity "svc_web" -TrustedToAuthForDelegation $true
+
+# Configure ACL vulnerabilities
+# Give adev GenericAll on devadmin (privilege escalation path)
+$devadminDN = (Get-ADUser -Identity "devadmin").DistinguishedName
+$adevSID = (Get-ADUser -Identity "adev").SID
+$acl = Get-Acl "AD:$devadminDN"
+$rule = New-Object System.DirectoryServices.ActiveDirectoryAccessRule($adevSID, "GenericAll", "Allow")
+$acl.AddAccessRule($rule)
+Set-Acl -Path "AD:$devadminDN" -AclObject $acl
+
+# Disable SMB Signing
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+Set-SmbServerConfiguration -RequireSecuritySignature $false -Force
+
+Write-Host "DC02 (dev.redteam.lab) setup complete!" -ForegroundColor Green
+Write-Host "Domain: dev.redteam.lab" -ForegroundColor Cyan
+Write-Host "Users created with password: DevPass2024!" -ForegroundColor Cyan
+Write-Host "Trust relationship with parent domain (redteam.lab) established" -ForegroundColor Cyan
