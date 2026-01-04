@@ -68,9 +68,6 @@ Attacker Machine
 
 7. **Establish External Trust**
     
-    ```powershell
-    # On DC03$TrustPassword = ConvertTo-SecureString "TrustP@ss123!" -AsPlainText -Forcenetdom trust external.lab /domain:redteam.lab /add /twoway /transitive:yes# On DC01$TrustPassword = ConvertTo-SecureString "TrustP@ss123!" -AsPlainText -Forcenetdom trust redteam.lab /domain:external.lab /add /twoway /transitive:yes
-    ```
     
 
 ## VM Resource Requirements
