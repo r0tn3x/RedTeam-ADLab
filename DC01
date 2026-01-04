@@ -1,0 +1,114 @@
+# ============================================
+# DC01 - Root Domain Controller Setup
+# Domain: redteam.lab
+# IP: 192.168.100.10
+# ============================================
+
+# Run this script as Administrator
+
+# Set static IP
+$IPAddress = "192.168.100.10"
+$PrefixLength = 24
+$Gateway = "192.168.100.1"
+$DNS = "127.0.0.1"
+
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $IPAddress -PrefixLength $PrefixLength -DefaultGateway $Gateway
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses $DNS
+
+# Set computer name
+Rename-Computer -NewName "DC01" -Force
+
+# Install AD DS Role
+Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools
+
+# Restart required after role installation
+Write-Host "Please restart and run Part 2 of this script" -ForegroundColor Yellow
+# Restart-Computer -Force
+
+# ============================================
+# PART 2 - Run after restart
+# ============================================
+
+# Promote to Domain Controller
+Import-Module ADDSDeployment
+
+$SecurePassword = ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force
+
+Install-ADDSForest `
+    -DomainName "redteam.lab" `
+    -DomainNetbiosName "REDTEAM" `
+    -ForestMode "WinThreshold" `
+    -DomainMode "WinThreshold" `
+    -InstallDns:$true `
+    -DatabasePath "C:\Windows\NTDS" `
+    -LogPath "C:\Windows\NTDS" `
+    -SysvolPath "C:\Windows\SYSVOL" `
+    -SafeModeAdministratorPassword $SecurePassword `
+    -Force:$true
+
+# Server will restart automatically
+
+# ============================================
+# PART 3 - Run after DC promotion restart
+# ============================================
+
+# Create Organizational Units
+New-ADOrganizationalUnit -Name "REDTEAM-Computers" -Path "DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "REDTEAM-Users" -Path "DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "REDTEAM-Servers" -Path "DC=redteam,DC=lab"
+New-ADOrganizationalUnit -Name "REDTEAM-ServiceAccounts" -Path "DC=redteam,DC=lab"
+
+# Create Users
+$Password = ConvertTo-SecureString "Summer2024!" -AsPlainText -Force
+
+# Regular Users
+New-ADUser -Name "John Smith" -SamAccountName "jsmith" -UserPrincipalName "jsmith@redteam.lab" -Path "OU=REDTEAM-Users,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Sarah Connor" -SamAccountName "sconnor" -UserPrincipalName "sconnor@redteam.lab" -Path "OU=REDTEAM-Users,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Bob Johnson" -SamAccountName "bjohnson" -UserPrincipalName "bjohnson@redteam.lab" -Path "OU=REDTEAM-Users,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Admin Users
+New-ADUser -Name "SQL Admin" -SamAccountName "sqladmin" -UserPrincipalName "sqladmin@redteam.lab" -Path "OU=REDTEAM-Users,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+New-ADUser -Name "Backup Admin" -SamAccountName "backupadmin" -UserPrincipalName "backupadmin@redteam.lab" -Path "OU=REDTEAM-Users,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true
+
+# Service Accounts (Kerberoastable)
+New-ADUser -Name "SQL Service" -SamAccountName "svc_sql" -UserPrincipalName "svc_sql@redteam.lab" -Path "OU=REDTEAM-ServiceAccounts,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true -PasswordNeverExpires $true
+New-ADUser -Name "IIS Service" -SamAccountName "svc_iis" -UserPrincipalName "svc_iis@redteam.lab" -Path "OU=REDTEAM-ServiceAccounts,DC=redteam,DC=lab" -AccountPassword $Password -Enabled $true -PasswordNeverExpires $true
+
+# Set SPNs for Kerberoasting
+Set-ADUser -Identity "svc_sql" -ServicePrincipalNames @{Add="MSSQLSvc/SRV02.redteam.lab:1433"}
+Set-ADUser -Identity "svc_iis" -ServicePrincipalNames @{Add="HTTP/SRV03.redteam.lab"}
+
+# Create Groups
+New-ADGroup -Name "IT Admins" -GroupScope Global -Path "OU=REDTEAM-Users,DC=redteam,DC=lab"
+New-ADGroup -Name "SQL Admins" -GroupScope Global -Path "OU=REDTEAM-Users,DC=redteam,DC=lab"
+New-ADGroup -Name "Helpdesk" -GroupScope Global -Path "OU=REDTEAM-Users,DC=redteam,DC=lab"
+
+# Add users to groups
+Add-ADGroupMember -Identity "IT Admins" -Members "sqladmin","backupadmin"
+Add-ADGroupMember -Identity "SQL Admins" -Members "sqladmin"
+Add-ADGroupMember -Identity "Helpdesk" -Members "jsmith"
+
+# Add IT Admins to Domain Admins (vulnerable)
+Add-ADGroupMember -Identity "Domain Admins" -Members "backupadmin"
+
+# Configure Unconstrained Delegation (vulnerable)
+Set-ADComputer -Identity "DC01" -TrustedForDelegation $true
+
+# Disable SMB Signing (vulnerable)
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+Set-SmbServerConfiguration -RequireSecuritySignature $false -Force
+
+# Enable LLMNR and NBT-NS (vulnerable)
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "EnableMulticast" -Value 1 -Force
+
+# Create reverse lookup zone
+Add-DnsServerPrimaryZone -NetworkID "192.168.100.0/24" -ReplicationScope Forest
+
+# Add DNS records for other servers (create these after setting up other machines)
+# Add-DnsServerResourceRecordA -Name "SRV02" -ZoneName "redteam.lab" -IPv4Address "192.168.100.12"
+# Add-DnsServerResourceRecordA -Name "SRV03" -ZoneName "redteam.lab" -IPv4Address "192.168.100.13"
+# Add-DnsServerResourceRecordA -Name "WS01" -ZoneName "redteam.lab" -IPv4Address "192.168.100.20"
+
+Write-Host "DC01 (redteam.lab) setup complete!" -ForegroundColor Green
+Write-Host "Domain: redteam.lab" -ForegroundColor Cyan
+Write-Host "Users created with password: Summer2024!" -ForegroundColor Cyan
