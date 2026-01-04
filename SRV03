@@ -1,0 +1,238 @@
+# ============================================
+# SRV03 - IIS Web Server Setup (redteam.lab)
+# IP: 192.168.100.13
+# ============================================
+
+# Run this script as Administrator
+
+# Set static IP
+$IPAddress = "192.168.100.13"
+$PrefixLength = 24
+$Gateway = "192.168.100.1"
+$DNS = "192.168.100.10"  # DC01
+
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $IPAddress -PrefixLength $PrefixLength -DefaultGateway $Gateway
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet" -ServerAddresses $DNS
+
+# Set computer name
+Rename-Computer -NewName "SRV03" -Force
+
+Write-Host "Please restart and run Part 2 of this script" -ForegroundColor Yellow
+# Restart-Computer -Force
+
+# ============================================
+# PART 2 - Join domain
+# ============================================
+
+# Join domain
+$DomainCred = Get-Credential -Message "Enter REDTEAM\Administrator credentials"
+Add-Computer -DomainName "redteam.lab" -Credential $DomainCred -Restart
+
+# ============================================
+# PART 3 - Run after domain join restart
+# ============================================
+
+# Install IIS with ASP.NET
+Install-WindowsFeature -Name Web-Server -IncludeManagementTools
+Install-WindowsFeature -Name Web-Asp-Net45
+Install-WindowsFeature -Name Web-CGI
+Install-WindowsFeature -Name Web-Windows-Auth
+
+# Configure IIS service account
+# The application pool should run as REDTEAM\svc_iis
+
+# Import WebAdministration module
+Import-Module WebAdministration
+
+# Create new application pool
+New-WebAppPool -Name "VulnerableAppPool"
+Set-ItemProperty IIS:\AppPools\VulnerableAppPool -Name processModel.identityType -Value 3
+Set-ItemProperty IIS:\AppPools\VulnerableAppPool -Name processModel.userName -Value "REDTEAM\svc_iis"
+Set-ItemProperty IIS:\AppPools\VulnerableAppPool -Name processModel.password -Value "Summer2024!"
+
+# Create website directory
+New-Item -Path "C:\inetpub\VulnerableApp" -ItemType Directory -Force
+
+# FIRST: Unlock authentication settings at server level
+Import-Module WebAdministration
+
+# Unlock windowsAuthentication and anonymousAuthentication
+Set-WebConfiguration -Filter '/system.webServer/security/authentication/windowsAuthentication' -PSPath 'IIS:\' -Metadata overrideMode -Value Allow
+Set-WebConfiguration -Filter '/system.webServer/security/authentication/anonymousAuthentication' -PSPath 'IIS:\' -Metadata overrideMode -Value Allow
+
+# Create vulnerable web application
+$WebConfig = @"
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <system.web>
+        <compilation debug="true" targetFramework="4.8" />
+        <authentication mode="Windows" />
+        <customErrors mode="Off" />
+    </system.web>
+    <system.webServer>
+        <security>
+            <authentication>
+                <windowsAuthentication enabled="true" />
+                <anonymousAuthentication enabled="false" />
+            </authentication>
+        </security>
+    </system.webServer>
+</configuration>
+"@
+
+$WebConfig | Out-File "C:\inetpub\VulnerableApp\web.config" -Encoding UTF8
+
+# Create vulnerable ASP.NET page with command injection
+$VulnerableAspx = @"
+<%@ Page Language="C#" %>
+<%@ Import Namespace="System.Diagnostics" %>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Network Tools</title>
+</head>
+<body>
+    <h1>Network Diagnostic Tool</h1>
+    <form runat="server">
+        <asp:Label runat="server" Text="Enter IP or hostname to ping:"></asp:Label>
+        <asp:TextBox ID="txtHost" runat="server"></asp:TextBox>
+        <asp:Button ID="btnPing" runat="server" Text="Ping" OnClick="btnPing_Click" />
+        <br /><br />
+        <asp:Label ID="lblResult" runat="server"></asp:Label>
+    </form>
+
+    <script runat="server">
+        protected void btnPing_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // VULNERABLE: Command injection vulnerability
+                string host = txtHost.Text;
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "cmd.exe";
+                psi.Arguments = "/c ping " + host; // No input validation!
+                psi.RedirectStandardOutput = true;
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                
+                Process proc = Process.Start(psi);
+                string output = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
+                
+                lblResult.Text = "<pre>" + Server.HtmlEncode(output) + "</pre>";
+            }
+            catch (Exception ex)
+            {
+                lblResult.Text = "Error: " + ex.Message;
+            }
+        }
+    </script>
+</body>
+</html>
+"@
+
+$VulnerableAspx | Out-File "C:\inetpub\VulnerableApp\Default.aspx" -Encoding UTF8
+
+# Create SQL injection vulnerable page
+$SQLInjectionPage = @"
+<%@ Page Language="C#" %>
+<%@ Import Namespace="System.Data.SqlClient" %>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>User Lookup</title>
+</head>
+<body>
+    <h1>User Search</h1>
+    <form runat="server">
+        <asp:Label runat="server" Text="Search username:"></asp:Label>
+        <asp:TextBox ID="txtUsername" runat="server"></asp:TextBox>
+        <asp:Button ID="btnSearch" runat="server" Text="Search" OnClick="btnSearch_Click" />
+        <br /><br />
+        <asp:GridView ID="gvResults" runat="server"></asp:GridView>
+    </form>
+
+    <script runat="server">
+        protected void btnSearch_Click(object sender, EventArgs e)
+        {
+            string connString = "Server=SRV02;Database=TestDB;Integrated Security=true;";
+            using (SqlConnection conn = new SqlConnection(connString))
+            {
+                // VULNERABLE: SQL injection
+                string query = "SELECT Username, Email, IsAdmin FROM Users WHERE Username LIKE '%" + txtUsername.Text + "%'";
+                SqlCommand cmd = new SqlCommand(query, conn);
+                SqlDataAdapter adapter = new SqlDataAdapter(cmd);
+                System.Data.DataTable dt = new System.Data.DataTable();
+                
+                conn.Open();
+                adapter.Fill(dt);
+                gvResults.DataSource = dt;
+                gvResults.DataBind();
+            }
+        }
+    </script>
+</body>
+</html>
+"@
+
+$SQLInjectionPage | Out-File "C:\inetpub\VulnerableApp\search.aspx" -Encoding UTF8
+
+# Create IIS website
+New-Website -Name "VulnerableApp" -Port 80 -PhysicalPath "C:\inetpub\VulnerableApp" -ApplicationPool "VulnerableAppPool" -Force
+
+# Remove default website
+Remove-Website -Name "Default Web Site"
+
+# Configure firewall
+New-NetFirewallRule -DisplayName "HTTP" -Direction Inbound -Protocol TCP -LocalPort 80 -Action Allow
+New-NetFirewallRule -DisplayName "HTTPS" -Direction Inbound -Protocol TCP -LocalPort 443 -Action Allow
+
+# Disable SMB Signing
+Set-SmbClientConfiguration -RequireSecuritySignature $false -Force
+Set-SmbServerConfiguration -RequireSecuritySignature $false -Force
+
+# Create vulnerable file share
+New-Item -Path "C:\WebFiles" -ItemType Directory -Force
+New-SmbShare -Name "WebFiles" -Path "C:\WebFiles" -ChangeAccess "Domain Users"
+
+# Set weak file permissions
+$acl = Get-Acl "C:\WebFiles"
+$rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Domain Users","FullControl","ContainerInherit,ObjectInherit","None","Allow")
+$acl.SetAccessRule($rule)
+Set-Acl "C:\WebFiles" -AclObject $acl
+
+# Create a file with credentials
+$CredsFile = @"
+# Database Connection Strings
+SQL_SERVER=SRV02
+SQL_DATABASE=TestDB
+SQL_USER=webapp
+SQL_PASSWORD=WebApp2024!
+
+# Service Account
+SERVICE_ACCOUNT=REDTEAM\svc_iis
+SERVICE_PASSWORD=Summer2024!
+"@
+
+$CredsFile | Out-File "C:\WebFiles\config.txt" -Encoding ASCII
+
+# Configure Kerberos delegation (Constrained Delegation)
+# Run this from DC01 as Domain Admin:
+Write-Host ""
+Write-Host "Constrained Delegation Setup (Run on DC01):" -ForegroundColor Yellow
+Write-Host 'Set-ADComputer -Identity SRV03 -Add @{"msDS-AllowedToDelegateTo"=@("MSSQLSvc/SRV02.redteam.lab","MSSQLSvc/SRV02.redteam.lab:1433")}' -ForegroundColor White
+Write-Host 'Set-ADComputer -Identity SRV03 -TrustedForDelegation $false' -ForegroundColor White
+
+# Configure SPN
+Write-Host ""
+Write-Host "Set SPN (Run on DC01):" -ForegroundColor Yellow
+Write-Host 'setspn -S HTTP/SRV03 REDTEAM\svc_iis' -ForegroundColor White
+Write-Host 'setspn -S HTTP/SRV03.redteam.lab REDTEAM\svc_iis' -ForegroundColor White
+
+Write-Host ""
+Write-Host "SRV03 Web Server setup complete!" -ForegroundColor Green
+Write-Host "Website URL: http://SRV03.redteam.lab" -ForegroundColor Cyan
+Write-Host "Service Account: REDTEAM\svc_iis" -ForegroundColor Cyan
+Write-Host "Vulnerable endpoints:" -ForegroundColor Cyan
+Write-Host "  - /Default.aspx (Command Injection)" -ForegroundColor Yellow
+Write-Host "  - /search.aspx (SQL Injection)" -ForegroundColor Yellow
